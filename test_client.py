@@ -1,36 +1,55 @@
-import requests
 import json
 import time
+import argparse
 
-url = "http://127.0.0.1:8000/review"
+import requests
 
-# 这是一段我们要测试的烂代码
-test_code = """
+from report_exporter import export_report
+
+URL = "http://127.0.0.1:8000/review"
+
+
+DEMO_CODE = """
 def update_user(name, pwd):
     db_conn = f"mysql://root:{pwd}@localhost/users"
     print("User updated")
 """
 
-print("正在将代码发送给 ReviewBot 服务器...\n")
 
-# 使用 stream=True 来接收流式数据
-response = requests.post(url, json={"code": test_code}, stream=True)
+def main() -> None:
+    parser = argparse.ArgumentParser(description="Send demo code to ReviewBot API.")
+    parser.add_argument("--save-report", action="store_true", help="Save Markdown and HTML report to reports/.")
+    args = parser.parse_args()
 
-# 逐行读取服务器实时推过来的数据
-for line in response.iter_lines():
-    if line:
-        # 解码 SSE 数据格式 (去掉开头的 "data: " 并解析 JSON)
-        decoded_line = line.decode('utf-8')
-        if decoded_line.startswith("data: "):
-            data_str = decoded_line[6:]
-            data = json.loads(data_str)
-            
-            # 如果还在处理中，打印进度条
-            if data["status"] == "processing":
-                print(data["message"])
-                time.sleep(0.5) # 为了视觉效果稍微停顿一下
-            
-            # 如果处理完了，打印最终报告
-            elif data["status"] == "done":
-                print("\n================ 最终报告 ================\n")
-                print(data["report"])
+    print("Sending demo code to ReviewBot...\n")
+    response = requests.post(URL, json={"code": DEMO_CODE}, stream=True, timeout=120)
+    response.raise_for_status()
+    final_report = ""
+
+    for line in response.iter_lines():
+        if not line:
+            continue
+        decoded_line = line.decode("utf-8")
+        if not decoded_line.startswith("data: "):
+            continue
+        data = json.loads(decoded_line[6:])
+        event = data.get("event")
+        if event == "node_end":
+            print(data.get("message"))
+            time.sleep(0.2)
+        elif event == "error":
+            print(f"[warning] {data.get('node')}: {data.get('message')}")
+        elif event == "done":
+            payload = data.get("data") or {}
+            final_report = payload.get("report", "")
+            print("\n================ Final Report ================\n")
+            print(final_report)
+
+    if args.save_report and final_report:
+        exported = export_report(final_report)
+        print(f"\nSaved Markdown: {exported.markdown_path}")
+        print(f"Saved HTML: {exported.html_path}")
+
+
+if __name__ == "__main__":
+    main()

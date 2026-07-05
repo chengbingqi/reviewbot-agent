@@ -1,0 +1,13 @@
+.git
+.env
+.env.*
+!.env.example
+__pycache__/
+*.pyc
+.pytest_cache/
+logs/
+reports/
+node_modules/
+cli-tui/node_modules/
+reviewbot_memory.db
+evals/eval_results.csv

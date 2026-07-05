@@ -1,0 +1,5 @@
+{"case_id":"hardcoded_secret","code":"API_KEY='abc123'\nprint(API_KEY)","expected_keywords":["secret","API key","hard-coded"]}
+{"case_id":"sql_injection","code":"def find_user(name, cursor):\n    cursor.execute('SELECT * FROM users WHERE name = ' + name)","expected_keywords":["SQL","injection","parameterized"]}
+{"case_id":"naming_style","code":"def BadFunctionName(x,y):\n    return x+y","expected_keywords":["naming","snake_case","style"]}
+{"case_id":"dangerous_eval","code":"def run(expr):\n    return eval(expr)","expected_keywords":["eval","dangerous","security"]}
+{"case_id":"missing_exception_handling","code":"def read_config(path):\n    return open(path).read()","expected_keywords":["exception","handling","file"]}

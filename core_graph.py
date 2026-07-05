@@ -1,152 +1,325 @@
-import os
-from rag_db import init_rag_db, search_similar_knowledge
+import time
+from typing import Any, TypedDict
+
 from langchain_core.output_parsers import JsonOutputParser
-from typing import TypedDict, List
-from langgraph.graph import StateGraph, END
-from langchain_openai import ChatOpenAI
-from pydantic import BaseModel, Field
 from langchain_core.prompts import ChatPromptTemplate
+from langchain_openai import ChatOpenAI
+from langgraph.graph import END, StateGraph
+from pydantic import BaseModel, Field
+from typing_extensions import NotRequired
 
-# ==========================================
-# 0. 配置大模型 API (这里以兼容 OpenAI 格式的 DeepSeek 为例)
-# 你需要替换成你自己的 API_KEY 和对应的 BASE_URL
-# ==========================================
-os.environ["OPENAI_API_KEY"] = "sk-10a8539439d04ded8d9c230a6fdf3eef" 
-os.environ["OPENAI_API_BASE"] = "https://api.deepseek.com/v1" # 如果用原生OpenAI，删掉这行
+from config import ConfigError, get_config, require_api_key
+from logging_config import logger
+from prompt_loader import load_prompt
+from rag_db import init_rag_db, search_similar_knowledge
+from tools import scan_python_code, scan_python_files
 
-# 初始化 LLM
-llm = ChatOpenAI(model="deepseek-chat", temperature=0) # 审查代码需要严谨，temperature 设为 0
 
-# ==========================================
-# 1. 定义状态 (保持不变)
-# ==========================================
 class AgentState(TypedDict):
     code_snippet: str
-    plan: List[str]
+    plan: list[str]
     current_task: str
-    review_results: List[str]
+    review_results: list[str]
     final_report: str
+    errors: NotRequired[list[dict[str, str]]]
+    rag_results: NotRequired[list[dict[str, Any]]]
+    tool_results: NotRequired[dict[str, dict[str, Any]]]
+    timings: NotRequired[dict[str, float]]
+    review_files: NotRequired[list[dict[str, str]]]
 
-# ==========================================
-# 1.5 定义 Planner 的输出结构
-# ==========================================
+
 class PlanOutput(BaseModel):
-    tasks: List[str] = Field(
-        description="需要执行的任务列表，只能从以下选项中选择：['style_check', 'security_check']"
+    tasks: list[str] = Field(
+        description="Tasks to execute. Allowed values: style_check, security_check."
     )
 
-# ==========================================
-# 2. 升级智能体节点 (Nodes) - 接入真实 LLM
-# ==========================================
 
-def planner_node(state: AgentState):
-    print("🧠 [PlannerAgent] 正在呼叫大模型分析代码并制定计划...")
-    code = state["code_snippet"]
-    
-    # 1. 实例化通用 JSON 解析器，并绑定我们的 PlanOutput 结构
-    parser = JsonOutputParser(pydantic_object=PlanOutput)
-    
-    # 2. 修改提示词：把解析器自动生成的“格式指令”塞进系统提示词中
-    prompt = ChatPromptTemplate.from_messages([
-        ("system", "你是一个资深的 DevOps 架构师。请分析以下代码，决定需要进行哪些审查。目前我们支持的审查工具只有 'style_check' (规范检查) 和 'security_check' (安全扫描)。如果代码涉及数据处理或变量定义，请加入 'style_check'；如果涉及密码、鉴权、数据库，请加入 'security_check'。\n\n必须严格按照以下 JSON 格式输出：\n{format_instructions}"),
-        ("user", "代码如下：\n{code}")
-    ])
-    
-    # 3. 重新组装 Chain：Prompt -> LLM -> JSON 解析器
-    planner_chain = prompt | llm | parser
-    
-    # 4. 执行时传入所需的变量
+def create_initial_state(code: str, review_files: list[dict[str, str]] | None = None) -> AgentState:
+    return {
+        "code_snippet": code,
+        "plan": [],
+        "current_task": "",
+        "review_results": [],
+        "final_report": "",
+        "errors": [],
+        "rag_results": [],
+        "tool_results": {},
+        "timings": {},
+        "review_files": review_files or [],
+    }
+
+
+def _append_error(state: AgentState, node: str, message: str, exc: Exception | None = None) -> None:
+    error = str(exc) if exc else message
+    state.setdefault("errors", []).append({"node": node, "message": message, "error": error})
+    logger.warning("%s: %s%s", node, message, f" error={error}" if exc else "")
+
+
+def _record_timing(state: AgentState, node: str, started_at: float) -> None:
+    elapsed = round(time.perf_counter() - started_at, 4)
+    state.setdefault("timings", {})[node] = elapsed
+    logger.info("node=%s elapsed_seconds=%s", node, elapsed)
+
+
+def _scan_state_files(state: AgentState) -> dict[str, dict[str, Any]]:
+    cfg = get_config()
+    review_files = state.get("review_files") or []
+    if review_files:
+        return scan_python_files(review_files, timeout_seconds=cfg.tool_timeout_seconds)
+    return scan_python_code(state["code_snippet"], timeout_seconds=cfg.tool_timeout_seconds)
+
+
+def get_llm() -> ChatOpenAI:
+    cfg = get_config()
+    api_key = require_api_key()
+    kwargs: dict[str, Any] = {
+        "model": cfg.model_name,
+        "temperature": 0,
+        "api_key": api_key,
+    }
+    if cfg.openai_api_base:
+        kwargs["base_url"] = cfg.openai_api_base
+    return ChatOpenAI(**kwargs)
+
+
+def planner_node(state: AgentState) -> AgentState:
+    node = "planner"
+    started_at = time.perf_counter()
+    logger.info("node=%s start", node)
     try:
-        result = planner_chain.invoke({
-            "code": code,
-            "format_instructions": parser.get_format_instructions()
-        })
-        # 解析器返回的是一个字典，我们直接提取 'tasks' 列表
-        state["plan"] = result["tasks"]
-        print(f"   -> 制定计划: {state['plan']}")
-    except Exception as e:
-        print(f"   ❌ 解析大模型输出失败: {e}")
-        state["plan"] = [] # 解析失败时的兜底逻辑
-        
+        parser = JsonOutputParser(pydantic_object=PlanOutput)
+        prompt = ChatPromptTemplate.from_messages(
+            [
+                (
+                    "system",
+                    load_prompt("planner") + "\n\nFormat instructions:\n{format_instructions}",
+                ),
+                ("user", "Code:\n{code}"),
+            ]
+        )
+        result = (prompt | get_llm() | parser).invoke(
+            {
+                "code": state["code_snippet"],
+                "format_instructions": parser.get_format_instructions(),
+            }
+        )
+        tasks = [task for task in result.get("tasks", []) if task in {"style_check", "security_check"}]
+        state["plan"] = tasks or ["style_check", "security_check"]
+    except ConfigError as exc:
+        _append_error(state, node, "LLM configuration missing; using default review plan.", exc)
+        state["plan"] = ["style_check", "security_check"]
+    except Exception as exc:
+        _append_error(state, node, "Planning failed; using default review plan.", exc)
+        state["plan"] = ["style_check", "security_check"]
+    finally:
+        _record_timing(state, node, started_at)
     return state
 
-def coordinator_node(state: AgentState):
-    print("👔 [CoordinatorAgent] 正在分配任务...")
+
+def coordinator_node(state: AgentState) -> AgentState:
+    node = "coordinator"
+    started_at = time.perf_counter()
+    logger.info("node=%s start", node)
     if state["plan"]:
-        state["current_task"] = state["plan"].pop(0) 
-        print(f"   -> 当前委派任务: {state['current_task']}")
+        state["current_task"] = state["plan"].pop(0)
     else:
         state["current_task"] = "done"
+    _record_timing(state, node, started_at)
     return state
 
-# 静态分析和安全扫描节点暂不接入真实工具，我们先用简单逻辑模拟，后续步骤再加
-def style_checker_node(state: AgentState):
-    print("🔍 [静态分析智能体] 正在检查代码规范...")
-    if "review_results" not in state:
-        state["review_results"] = []
-    
-    if "def " in state["code_snippet"] and ":" in state["code_snippet"]:
-        # 简单模拟：让 LLM 帮忙看一眼规范
-        response = llm.invoke(f"请用一句话指出这段代码的命名或格式不规范之处（如果没有则说'无'）：{state['code_snippet']}")
-        state["review_results"].append(f"规范检查：{response.content}")
+
+def _format_tool_result(name: str, result: dict[str, Any] | None) -> str:
+    if not result:
+        return f"### {name.title()}\n- Status: skipped\n- Findings: no result"
+    output = result.get("stdout") or result.get("stderr") or result.get("message") or "No findings."
+    output = output[:3000]
+    return (
+        f"### {name.title()}\n"
+        f"- Status: {result.get('status')}\n"
+        f"- Return code: {result.get('returncode')}\n"
+        f"- Findings:\n```text\n{output}\n```"
+    )
+
+
+def style_checker_node(state: AgentState) -> AgentState:
+    node = "style_checker"
+    started_at = time.perf_counter()
+    logger.info("node=%s start", node)
+    try:
+        state["tool_results"] = _scan_state_files(state)
+        ruff_result = state["tool_results"].get("ruff")
+        logger.info("ruff status=%s", ruff_result.get("status") if ruff_result else "missing")
+
+        prompt = ChatPromptTemplate.from_messages(
+            [
+                ("system", load_prompt("style_checker")),
+                ("user", "Code:\n{code}\n\nRuff result:\n{ruff_result}"),
+            ]
+        )
+        try:
+            response = (prompt | get_llm()).invoke(
+                {"code": state["code_snippet"], "ruff_result": _format_tool_result("ruff", ruff_result)}
+            )
+            state["review_results"].append(f"Style review:\n{response.content}")
+        except ConfigError as exc:
+            _append_error(state, node, "LLM style review skipped because API key is missing.", exc)
+            state["review_results"].append(_format_tool_result("ruff", ruff_result))
+        except Exception as exc:
+            _append_error(state, node, "LLM style review failed; keeping Ruff result.", exc)
+            state["review_results"].append(_format_tool_result("ruff", ruff_result))
+    except Exception as exc:
+        _append_error(state, node, "Style check failed.", exc)
+    finally:
+        _record_timing(state, node, started_at)
     return state
 
-def security_scanner_node(state: AgentState):
-    print("🛡️ [安全扫描智能体] 正在扫描安全漏洞...")
-    if "review_results" not in state:
-        state["review_results"] = []
-    
-    code = state["code_snippet"]
-    
-    # --- RAG 检索环节 ---
-    print("   -> 正在检索本地项目规范记忆库...")
-    db = init_rag_db()
-    # 根据当前代码去搜寻相关的内部规范
-    context_list = search_similar_knowledge(db, code, limit=1)
-    context = context_list[0] if context_list else "无特定内部规范"
-    print(f"   -> 检索到背景知识: {context}")
-    
-    # --- 结合记忆生成审查意见 ---
-    prompt = ChatPromptTemplate.from_messages([
-        ("system", "你是一个代码安全审计专家。请结合【内部背景知识】，指出下面代码的安全漏洞。\n\n【内部背景知识】\n{context}"),
-        ("user", "代码如下：\n{code}")
-    ])
-    
-    security_chain = prompt | llm
-    response = security_chain.invoke({
-        "context": context,
-        "code": code
-    })
-    
-    state["review_results"].append(f"安全扫描：{response.content}")
+
+def security_scanner_node(state: AgentState) -> AgentState:
+    node = "security_scanner"
+    started_at = time.perf_counter()
+    logger.info("node=%s start", node)
+    try:
+        cfg = get_config()
+        if "tool_results" not in state or not state["tool_results"]:
+            state["tool_results"] = _scan_state_files(state)
+        bandit_result = state["tool_results"].get("bandit")
+        logger.info("bandit status=%s", bandit_result.get("status") if bandit_result else "missing")
+
+        try:
+            db = init_rag_db(cfg.rag_db_path)
+            state["rag_results"] = search_similar_knowledge(
+                db, state["code_snippet"], top_k=cfg.rag_top_k
+            )
+        except Exception as exc:
+            _append_error(state, node, "RAG retrieval failed; fallback to LLM-only review.", exc)
+            state["rag_results"] = []
+
+        rag_context = "\n".join(
+            f"- {item.get('source', 'internal-rules')}: "
+            f"{item.get('title') or item.get('rule_id') or item.get('content')}"
+            for item in state.get("rag_results", [])
+        ) or "No RAG rule hit."
+
+        prompt = ChatPromptTemplate.from_messages(
+            [
+                ("system", load_prompt("security_scanner")),
+                (
+                    "user",
+                    "Code:\n{code}\n\nBandit result:\n{bandit_result}\n\nRAG rules:\n{rag_context}",
+                ),
+            ]
+        )
+        try:
+            response = (prompt | get_llm()).invoke(
+                {
+                    "code": state["code_snippet"],
+                    "bandit_result": _format_tool_result("bandit", bandit_result),
+                    "rag_context": rag_context,
+                }
+            )
+            state["review_results"].append(f"Security review:\n{response.content}")
+        except ConfigError as exc:
+            _append_error(state, node, "LLM security review skipped because API key is missing.", exc)
+            state["review_results"].append(_format_tool_result("bandit", bandit_result))
+        except Exception as exc:
+            _append_error(state, node, "LLM security review failed; keeping Bandit and RAG results.", exc)
+            state["review_results"].append(_format_tool_result("bandit", bandit_result))
+    except Exception as exc:
+        _append_error(state, node, "Security scan failed.", exc)
+    finally:
+        _record_timing(state, node, started_at)
     return state
 
-def summary_node(state: AgentState):
-    print("📝 [SummaryAgent] 正在呼叫大模型生成最终报告...")
-    results_str = "\n".join(state["review_results"])
-    
-    prompt = ChatPromptTemplate.from_messages([
-        ("system", "你是一个负责代码审查的技术主管。请根据以下子智能体收集到的问题，用 Markdown 格式写一份专业、语气温和的代码审查报告。"),
-        ("user", "原始代码：\n{code}\n\n审查问题汇总：\n{results}")
-    ])
-    
-    summary_chain = prompt | llm
-    response = summary_chain.invoke({
-        "code": state["code_snippet"],
-        "results": results_str
-    })
-    
-    state["final_report"] = response.content
+
+def _tool_summary_markdown(state: AgentState) -> str:
+    tool_results = state.get("tool_results", {})
+    return "\n\n".join(
+        [
+            "## Tool Summary",
+            _format_tool_result("ruff", tool_results.get("ruff")),
+            _format_tool_result("bandit", tool_results.get("bandit")),
+        ]
+    )
+
+
+def _rag_markdown(state: AgentState) -> str:
+    rag_results = state.get("rag_results", [])
+    if not rag_results:
+        return "## Reference Rules\n\n- No RAG rule hit."
+    lines = ["## Reference Rules"]
+    for item in rag_results:
+        label = item.get("title") or item.get("rule_id") or "Untitled rule"
+        distance = item.get("distance")
+        suffix = f" (distance: {distance:.4f})" if isinstance(distance, (float, int)) else ""
+        lines.append(f"- {item.get('source', 'internal-rules')}: {label}{suffix}")
+    return "\n".join(lines)
+
+
+def _fallback_report(state: AgentState) -> str:
+    sections = [
+        "# Code Review Report",
+        "## Review Results",
+        "\n\n".join(state.get("review_results", [])) or "No review result was generated.",
+        _tool_summary_markdown(state),
+        _rag_markdown(state),
+    ]
+    if state.get("errors"):
+        sections.append("## Recoverable Errors")
+        sections.extend(f"- {err['node']}: {err['message']}" for err in state["errors"])
+    return "\n\n".join(sections)
+
+
+def summary_node(state: AgentState) -> AgentState:
+    node = "summary"
+    started_at = time.perf_counter()
+    logger.info("node=%s start", node)
+    try:
+        prompt = ChatPromptTemplate.from_messages(
+            [
+                ("system", load_prompt("summary")),
+                (
+                    "user",
+                    "Original code:\n{code}\n\nReview results:\n{results}\n\n"
+                    "Tool summary:\n{tool_summary}\n\nRAG rules:\n{rag_rules}",
+                ),
+            ]
+        )
+        try:
+            response = (prompt | get_llm()).invoke(
+                {
+                    "code": state["code_snippet"],
+                    "results": "\n\n".join(state.get("review_results", [])),
+                    "tool_summary": _tool_summary_markdown(state),
+                    "rag_rules": _rag_markdown(state),
+                }
+            )
+            state["final_report"] = (
+                response.content
+                + "\n\n"
+                + _tool_summary_markdown(state)
+                + "\n\n"
+                + _rag_markdown(state)
+            )
+        except ConfigError as exc:
+            _append_error(state, node, "LLM summary skipped because API key is missing.", exc)
+            state["final_report"] = _fallback_report(state)
+        except Exception as exc:
+            _append_error(state, node, "LLM summary failed; using fallback report.", exc)
+            state["final_report"] = _fallback_report(state)
+    finally:
+        logger.info("final_report_generated=%s", bool(state.get("final_report")))
+        _record_timing(state, node, started_at)
     return state
 
-# ==========================================
-# 3. 路由逻辑与构建图 (保持不变)
-# ==========================================
+
 def route_task(state: AgentState) -> str:
     task = state.get("current_task")
-    if task == "style_check": return "style_checker"
-    elif task == "security_check": return "security_scanner"
-    return "summary" 
+    if task == "style_check":
+        return "style_checker"
+    if task == "security_check":
+        return "security_scanner"
+    return "summary"
+
 
 workflow = StateGraph(AgentState)
 workflow.add_node("planner", planner_node)
@@ -157,32 +330,27 @@ workflow.add_node("summary", summary_node)
 
 workflow.set_entry_point("planner")
 workflow.add_edge("planner", "coordinator")
-workflow.add_conditional_edges("coordinator", route_task, {"style_checker": "style_checker", "security_scanner": "security_scanner", "summary": "summary"})
+workflow.add_conditional_edges(
+    "coordinator",
+    route_task,
+    {
+        "style_checker": "style_checker",
+        "security_scanner": "security_scanner",
+        "summary": "summary",
+    },
+)
 workflow.add_edge("style_checker", "coordinator")
 workflow.add_edge("security_scanner", "coordinator")
 workflow.add_edge("summary", END)
 
 app = workflow.compile()
 
-# ==========================================
-# 4. 运行测试
-# ==========================================
+
 if __name__ == "__main__":
-    print("🚀 启动 ReviewBot (LLM驱动版) 工作流测试...\n")
-    
-    test_code = """
-def ConnectDatabase(user, pwd):
-    # connecting to db
+    demo_code = """
+def connect_database(user, pwd):
     connection_string = f"mysql://{user}:{pwd}@localhost/db"
     return connection_string
-    """
-    
-    initial_state = AgentState(
-        code_snippet=test_code,
-        plan=[], current_task="", review_results=[], final_report=""
-    )
-    
-    final_state = app.invoke(initial_state)
-    
-    print("\n✅ 工作流执行完毕！最终输出：\n")
+"""
+    final_state = app.invoke(create_initial_state(demo_code))
     print(final_state["final_report"])
