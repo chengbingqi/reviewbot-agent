@@ -55,7 +55,7 @@ reviewbot-agent/
 
 ## Environment Setup
 
-Windows 10 + Anaconda:
+Anaconda:
 
 ```bash
 cd /d D:\code\reviewbot-agent
