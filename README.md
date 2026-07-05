@@ -1,72 +1,410 @@
-# 🤖 ReviewBot: 基于 LangGraph 的 DevOps 自动化代码审查智能体
+# reviewbot-agent
 
-![Python](https://img.shields.io/badge/Python-3.10+-blue.svg)
-![Node.js](https://img.shields.io/badge/Node.js-18+-green.svg)
-![LangGraph](https://img.shields.io/badge/LangGraph-Multi--Agent-orange)
-![FastAPI](https://img.shields.io/badge/FastAPI-Streaming-009688)
-![React Ink](https://img.shields.io/badge/React_Ink-CLI_TUI-61DAFB)
+`reviewbot-agent` is an AI code review engineering prototype. It provides a
+FastAPI backend, LangGraph workflow, LangChain model calls, sqlite-vec RAG rule
+retrieval, Ruff/Bandit tool scans, report export, lightweight evals, and a React
+Ink terminal UI.
 
-ReviewBot 是一个面向 DevOps 场景的自动化代码审查与测试多智能体（Multi-Agent）系统。本项目采用 `Plan-Execute` 与 `ReAct` 架构，结合本地 RAG（检索增强生成）记忆库，能够自动拆解代码审查任务，并流式输出结合企业内部规范的专业审查报告。
+The project is designed for local development and repeatable engineering demos.
+It is not a replacement for a production security scanner.
 
-## ✨ 核心特性
+## Core Flow
 
-- **🧠 多智能体协同编排**：基于 LangChain 和 LangGraph 构建。包含 PlannerAgent（结构化任务规划）、CoordinatorAgent（任务调度分发）、以及专职子智能体（静态规范扫描、安全漏洞检测）。
-- **📚 领域知识增强 (RAG)**：集成 `HuggingFace` 本地轻量级向量模型与 `SQLite-Vec` 向量数据库。在审查代码前，智能体会自动检索本地库中的“企业内部开发规范”，确保审查建议贴合实际业务场景。
-- **⚡ 流式 API 微服务**：后端采用 FastAPI 框架，利用 Server-Sent Events (SSE) 技术将 LangGraph 复杂工作流的底层执行状态实时推送到客户端。
-- **💻 沉浸式终端交互 (CLI TUI)**：前端摒弃传统网页，使用 TypeScript 结合 React Ink 跨界开发，打造具备动态动画与流式 Markdown 渲染的极客风终端界面。
+```text
+code or files
+-> FastAPI /review or /review-files
+-> LangGraph planner/coordinator/checker/summary nodes
+-> Ruff and Bandit scans
+-> sqlite-vec RAG rule retrieval
+-> ChatOpenAI-compatible model call when OPENAI_API_KEY is configured
+-> SSE progress events and Markdown report
+```
 
-## 🛠️ 技术选型
+## Tech Stack
 
-* **大语言模型**：DeepSeek API (兼容 OpenAI 接口标准，利用 `JsonOutputParser` 实现高稳定性结构化输出)
-* **智能体框架**：Python, LangChain, LangGraph
-* **向量检索与持久化**：SQLite, SQLite-Vec, sentence-transformers
-* **后端服务**：FastAPI, Uvicorn, Pydantic
-* **前端展示**：TypeScript, React, Ink, tsx
+- Python 3.10 or 3.11 recommended.
+- FastAPI, Uvicorn, Pydantic.
+- LangChain, LangGraph, langchain-openai.
+- sqlite-vec, langchain-huggingface, sentence-transformers.
+- Ruff, Bandit, pytest.
+- TypeScript, React Ink, tsx.
+- Docker and GitHub Actions CI.
 
-## 🚀 快速开始
+## Directory Structure
 
-### 1. 环境准备
+```text
+reviewbot-agent/
+|-- api_server.py
+|-- core_graph.py
+|-- rag_db.py
+|-- ingest_rules.py
+|-- review_directory.py
+|-- report_exporter.py
+|-- test_client.py
+|-- config.py
+|-- tools.py
+|-- prompts/
+|-- rules/
+|-- evals/
+|-- tests/
+|-- cli-tui/
+|-- Dockerfile
+|-- .github/workflows/ci.yml
+`-- ROADMAP.md
+```
 
-确保本地已安装 **Python 3.10+** 和 **Node.js (LTS)**。建议使用 Conda 创建独立的 Python 虚拟环境。
+## Environment Setup
+
+Windows 10 + Anaconda:
 
 ```bash
-# 克隆仓库
-git clone [https://github.com/你的用户名/reviewbot-agent.git](https://github.com/你的用户名/reviewbot-agent.git)
-cd reviewbot-agent
+cd /d D:\code\reviewbot-agent
 
-# 创建并激活虚拟环境 (可选)
-conda create -n reviewbot python=3.10 -y
-conda activate reviewbot
-2. 配置后端 (Python)
-安装核心依赖包并配置大模型 API 密钥：
-# 安装 Python 依赖
-pip install langchain langgraph sqlite-vec fastapi uvicorn langchain-openai pydantic sentence-transformers langchain-huggingface requests
-# 初始化本地知识库 (首次运行会自动下载 HuggingFace 轻量级模型)
+conda create -n reviewbot-agent python=3.10 -y
+conda activate reviewbot-agent
+
+pip install -r requirements.txt
+
+copy .env.example .env
+```
+
+Edit `.env` and fill in your own key:
+
+```env
+OPENAI_API_KEY=your_api_key_here
+OPENAI_API_BASE=https://api.deepseek.com/v1
+MODEL_NAME=deepseek-chat
+AUTH_ENABLED=false
+AUTH_TOKEN=change_me
+RATE_LIMIT_ENABLED=false
+RATE_LIMIT_PER_MINUTE=20
+```
+
+Do not commit `.env`.
+
+Optional API token authentication and request limiting are disabled by default.
+Enable them only when you need production-style local hardening:
+
+```env
+AUTH_ENABLED=true
+AUTH_TOKEN=replace_with_a_private_token
+RATE_LIMIT_ENABLED=true
+RATE_LIMIT_PER_MINUTE=20
+```
+
+When auth is enabled, clients must send `Authorization: Bearer <token>`.
+
+## RAG Rule Import
+
+Initialize or migrate the sqlite-vec database:
+
+```bash
 python rag_db.py
-注意：请在 core_graph.py 中将 os.environ["OPENAI_API_KEY"] 替换为你自己的 DeepSeek/OpenAI API 密钥。
-3. 配置前端 (Node.js)
-进入前端 TUI 目录并安装依赖：
-cd cli-tui
+```
+
+Import sample Markdown rules:
+
+```bash
+python ingest_rules.py --file rules/security_rules.md
+python ingest_rules.py --dir rules
+```
+
+Rules are deduplicated by `content_hash`. Re-importing the same files reports
+skipped records instead of inserting duplicates.
+
+## Start Backend
+
+```bash
+uvicorn api_server:app --reload --host 127.0.0.1 --port 8000
+```
+
+API docs:
+
+```text
+http://127.0.0.1:8000/docs
+```
+
+Health check:
+
+```text
+http://127.0.0.1:8000/health
+```
+
+## Single Snippet Review
+
+```bash
+python test_client.py
+python test_client.py --save-report
+```
+
+`--save-report` writes Markdown and HTML files to `reports/`.
+
+## Multi-file Review API
+
+`POST /review-files` accepts multiple Python files while preserving file paths:
+
+```json
+{
+  "files": [
+    {"path": "app/main.py", "content": "def hello():\n    print('hello')"},
+    {"path": "app/utils.py", "content": "def add(a,b):\n    return a+b"}
+  ]
+}
+```
+
+Limits are enforced in `api_server.py` to avoid very large requests.
+
+The endpoint emits file-level SSE events such as `review_start`, `file_start`,
+`file_progress`, `file_end`, `tool_end`, `review_complete`, and `done`. See
+[docs/frontend_api.md](docs/frontend_api.md) for the event contract intended for
+future React frontend work.
+
+## Directory Review
+
+Review a local directory through the running backend:
+
+```bash
+python review_directory.py --path D:\code\some-project --max-files 20
+python review_directory.py --path D:\code\some-project --save-report
+```
+
+Run without a backend by using local mode:
+
+```bash
+python review_directory.py --path D:\code\some-project --local --max-files 20
+python review_directory.py --path D:\code\some-project --local --save-report
+```
+
+The script reads `.py` files only and ignores `.venv`, `venv`, `__pycache__`,
+`.git`, and `node_modules`.
+
+## Report Export
+
+Reports are exported by `report_exporter.py`:
+
+```text
+reports/review_YYYYMMDD_HHMMSS.md
+reports/review_YYYYMMDD_HHMMSS.html
+```
+
+The HTML output is intentionally simple and local-friendly.
+
+Exported reports are normalized toward this structure:
+
+```text
+ReviewBot Report
+|-- Summary
+|-- File Overview
+|-- Tool Summary
+|-- RAG References
+|-- Findings
+|-- Suggestions
+`-- Metadata
+```
+
+Each saved report updates `reports/report_history.db` and keeps
+`reports/index.json` as a compatibility file. The backend keeps the latest 100
+records.
+The backend exposes report history through:
+
+```text
+GET /reports
+GET /reports/{review_id}
+GET /reports/{review_id}/html
+```
+
+Migrate old `reports/index.json` data into SQLite:
+
+```bash
+python migrate_reports.py
+```
+
+## Evals
+
+Run lightweight local evals:
+
+```bash
+python evals/run_evals.py --min-pass-rate 0.8
+```
+
+Run evals through a running backend:
+
+```bash
+python evals/run_evals.py --use-api
+```
+
+Results are written to:
+
+```text
+evals/eval_results.csv
+```
+
+The eval runner does not require a real LLM key; without one, it evaluates the
+fallback/tool-based report.
+
+The command exits with a non-zero code when the pass rate is below the threshold.
+
+## React Ink TUI
+
+```bash
+cd /d D:\code\reviewbot-agent\cli-tui
 npm install
-4. 运行系统
-本项目采用前后端分离架构，需要开启两个终端窗口。
-
-终端 1：启动 FastAPI 后端服务
-# 在项目根目录下运行
-python api_server.py
-# 服务将运行在 [http://127.0.0.1:8000](http://127.0.0.1:8000)
-终端 2：启动交互式命令行界面
-# 在 cli-tui 目录下运行
+npm audit
 npx tsx ui.tsx
+```
 
-📁 项目结构
-reviewbot-agent/
-├── core_graph.py       # LangGraph 多智能体状态机与核心工作流定义
-├── rag_db.py           # 本地向量模型初始化与 SQLite-Vec 检索逻辑
-├── api_server.py       # FastAPI 后端服务与 SSE 流式推送接口
-├── test_client.py      # Python 命令行测试脚本
-├── reviewbot_memory.db # SQLite 本地持久化与向量数据库文件
-└── cli-tui/            # TypeScript 终端前端界面目录
-    ├── package.json    # Node.js 依赖配置 (启用 ESM 规范)
-    ├── tsconfig.json   # TypeScript 编译配置
-    └── ui.tsx          # React Ink 核心渲染逻辑与状态管理
+The current TUI sends built-in demo code to the backend.
+
+## React Web Frontend
+
+Terminal 1: start the backend.
+
+```bash
+cd /d D:\code\reviewbot-agent
+conda activate reviewbot-agent
+uvicorn api_server:app --reload --host 127.0.0.1 --port 8000
+```
+
+Terminal 2: start the React frontend.
+
+```bash
+cd /d D:\code\reviewbot-agent\frontend
+npm install
+copy .env.example .env
+npm run dev
+```
+
+Open:
+
+```text
+http://127.0.0.1:5173
+```
+
+The web UI supports backend health checks, single code review, multi-file review,
+SSE progress, file progress, report viewing, report history, Markdown download,
+and HTML report preview.
+
+The report viewer renders Markdown with headings, lists, tables, links, and code
+blocks. Rendered Markdown is sanitized on the frontend. Multi-file review also
+supports a selected-file list, file-size and line-count display, content preview,
+single-file removal, and clearing all selected files before submitting.
+
+Frontend checks:
+
+```bash
+cd /d D:\code\reviewbot-agent\frontend
+npm audit
+npx tsc --noEmit
+npm test
+npm run build
+```
+
+Playwright E2E checks require the backend to be running:
+
+```bash
+cd /d D:\code\reviewbot-agent\frontend
+npm run e2e
+npm run e2e:smoke
+```
+
+If Playwright browsers are missing:
+
+```bash
+npx playwright install
+```
+
+Production build and local preview:
+
+```bash
+copy .env.production.example .env.production
+npm run build
+npm run preview
+```
+
+`dev` is for local development, `build` writes `dist/`, and `preview` serves the
+production build locally. Configure `VITE_API_BASE_URL` for the backend address
+used by the built frontend.
+
+Manual end-to-end checks are listed in
+[docs/manual_test_checklist.md](docs/manual_test_checklist.md).
+
+## Tests
+
+```bash
+cd /d D:\code\reviewbot-agent
+pytest -q
+```
+
+Tests do not require a real LLM key and do not require the backend to be running.
+
+Playwright E2E tests do require a running backend on `127.0.0.1:8000`, but still
+work with the backend fallback path when no real LLM key is configured.
+
+## Docker
+
+Build and run the FastAPI backend:
+
+```bash
+docker build -t reviewbot-agent .
+docker run --env-file .env -p 8000:8000 reviewbot-agent
+```
+
+The image does not copy `.env`. `sentence-transformers` may download the
+embedding model at runtime or during first RAG use.
+
+Docker Compose backend run with report persistence:
+
+```bash
+docker compose up --build
+```
+
+The compose file mounts `./reports:/app/reports`.
+
+More deployment notes are in [docs/deployment.md](docs/deployment.md).
+
+## CI
+
+GitHub Actions workflow is defined in:
+
+```text
+.github/workflows/ci.yml
+```
+
+It installs dependencies on Python 3.11, runs syntax checks, executes
+`pytest -q`, runs evals, installs frontend dependencies, runs npm audit,
+TypeScript checks, Vitest, frontend build, and Playwright smoke E2E:
+
+```bash
+python evals/run_evals.py --min-pass-rate 0.8
+npm run e2e:smoke
+```
+
+CI does not require `OPENAI_API_KEY`.
+
+## Logging
+
+Runtime logs are written to:
+
+```text
+logs/reviewbot.log
+```
+
+Logs include request lifecycle, node timing, RAG hit counts, tool status, and
+recoverable errors. API keys are not logged.
+
+## Common Issues
+
+- `OPENAI_API_KEY is not configured`: copy `.env.example` to `.env` and fill in
+  your key.
+- `sqlite_vec` import error: install dependencies in the active conda environment.
+- First RAG use is slow: the embedding model may be downloading.
+- Ruff or Bandit skipped: ensure the environment scripts directory is on `PATH`.
+- `401 Authentication required`: `AUTH_ENABLED=true`; configure the bearer token
+  in your client or frontend `.env`.
+- `429 Rate limit exceeded`: lower request volume or increase
+  `RATE_LIMIT_PER_MINUTE`.
+- Old report history missing: run `python migrate_reports.py`.
+- PowerShell blocks `npm.ps1`: use `cmd /c npm ...` or adjust execution policy.
+- Docker slim image builds can be slow because ML dependencies are large.
+
+More engineering plans are tracked in [ROADMAP.md](ROADMAP.md).

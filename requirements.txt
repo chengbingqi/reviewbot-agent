@@ -1,0 +1,15 @@
+fastapi
+uvicorn
+pydantic
+python-dotenv
+requests
+langchain
+langgraph
+langchain-openai
+langchain-huggingface
+sentence-transformers
+sqlite-vec
+ruff
+bandit
+pytest
+typing_extensions

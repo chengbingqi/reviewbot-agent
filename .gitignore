@@ -10,7 +10,12 @@ env/
 
 # Environment variables
 .env
-.env.local
+.env.*
+!.env.example
+frontend/.env
+frontend/.env.*
+!frontend/.env.example
+!frontend/.env.production.example
 
 # IDE
 .vscode/
@@ -21,10 +26,22 @@ env/
 Thumbs.db
 
 # Logs
+logs/
 *.log
+
+# Generated reports and eval outputs
+reports/
+eval_results.csv
+evals/eval_results.csv
 
 # Node / Frontend
 node_modules/
+frontend/node_modules/
+frontend/dist/
+frontend/playwright-report/
+frontend/test-results/
+frontend/*.tsbuildinfo
+cli-tui/node_modules/
 dist/
 build/
 
@@ -36,6 +53,7 @@ build/
 # Cache
 .cache/
 .pytest_cache/
+.ruff_cache/
 
 # Model / large files
 *.pt

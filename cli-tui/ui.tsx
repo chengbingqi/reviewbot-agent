@@ -2,59 +2,68 @@ import React, { useState, useEffect } from 'react';
 import { render, Text, Box } from 'ink';
 import Spinner from 'ink-spinner';
 
+type SsePayload = {
+    event: string;
+    node?: string;
+    message: string;
+    data?: {
+        report?: string;
+    };
+    error?: string;
+};
+
 const App = () => {
-    // 定义界面状态
-    const [status, setStatus] = useState('初始化中...');
+    const [status, setStatus] = useState('Initializing...');
     const [report, setReport] = useState('');
+    const [warnings, setWarnings] = useState<string[]>([]);
     const [isDone, setIsDone] = useState(false);
 
     useEffect(() => {
-        // 这个函数负责调用我们写好的 Python 后端
         const runAgent = async () => {
-            setStatus('正在连接 ReviewBot 后台服务...');
-            
-            // 准备一段用于测试的代码
+            setStatus('Connecting to ReviewBot backend...');
+
             const testCode = `
 def update_user(name, db_host, db_name):
-    # 这里的密码有安全风险哦
     db_conn = f"mysql://root:123456@{db_host}/{db_name}"
     print("User updated")
             `;
-            
+
             try {
-                // 使用原生的 fetch 发起 POST 请求
                 const response = await fetch('http://127.0.0.1:8000/review', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ code: testCode })
                 });
 
-                // 读取服务器源源不断推过来的流式数据 (SSE)
                 const reader = response.body?.getReader();
                 const decoder = new TextDecoder('utf-8');
 
+                if (!reader) {
+                    throw new Error('Response stream is unavailable.');
+                }
+
                 while (true) {
-                    const { done, value } = await reader!.read();
+                    const { done, value } = await reader.read();
                     if (done) break;
-                    
+
                     const chunk = decoder.decode(value);
                     const lines = chunk.split('\n');
-                    
+
                     for (const line of lines) {
-                        if (line.startsWith('data: ')) {
-                            // 解析后端传来的 JSON 进度
-                            const data = JSON.parse(line.slice(6));
-                            if (data.status === 'processing') {
-                                setStatus(data.message); // 更新动画旁边的文字
-                            } else if (data.status === 'done') {
-                                setReport(data.report);  // 保存最终报告
-                                setIsDone(true);         // 标记任务完成
-                            }
+                        if (!line.startsWith('data: ')) continue;
+                        const payload = JSON.parse(line.slice(6)) as SsePayload;
+                        if (payload.event === 'node_end') {
+                            setStatus(payload.message);
+                        } else if (payload.event === 'error') {
+                            setWarnings((items) => [...items, `${payload.node ?? 'unknown'}: ${payload.message}`]);
+                        } else if (payload.event === 'done') {
+                            setReport(payload.data?.report ?? '');
+                            setIsDone(true);
                         }
                     }
                 }
             } catch (error) {
-                setStatus('❌ 连接失败，请确保 Python 后台服务已启动！');
+                setWarnings((items) => [...items, 'Connection failed. Ensure the Python backend is running.']);
                 setIsDone(true);
             }
         };
@@ -62,15 +71,12 @@ def update_user(name, db_host, db_name):
         runAgent();
     }, []);
 
-    // 渲染 UI 界面
     return (
         <Box flexDirection="column" padding={1}>
-            {/* 顶部标题框 */}
             <Box borderStyle="round" borderColor="cyan" padding={1}>
-                <Text bold color="cyan">🚀 ReviewBot - 智能 DevOps 审查终端</Text>
+                <Text bold color="cyan">ReviewBot - AI Code Review Terminal</Text>
             </Box>
-            
-            {/* 状态展示区 */}
+
             {!isDone ? (
                 <Box marginTop={1}>
                     <Text color="green"><Spinner type="dots" /> </Text>
@@ -78,9 +84,17 @@ def update_user(name, db_host, db_name):
                 </Box>
             ) : (
                 <Box marginTop={1} flexDirection="column">
-                    <Text bold color="green">✅ 代码审查完成！生成报告如下：</Text>
+                    <Text bold color="green">Review finished.</Text>
+                    {warnings.length > 0 && (
+                        <Box marginTop={1} flexDirection="column">
+                            <Text color="yellow">Warnings:</Text>
+                            {warnings.map((item, index) => (
+                                <Text key={index} color="yellow">- {item}</Text>
+                            ))}
+                        </Box>
+                    )}
                     <Box marginTop={1} paddingLeft={2} borderStyle="single" borderColor="gray">
-                        <Text>{report}</Text>
+                        <Text>{report || 'No report generated.'}</Text>
                     </Box>
                 </Box>
             )}
@@ -88,5 +102,4 @@ def update_user(name, db_host, db_name):
     );
 };
 
-// 启动 React 终端应用
 render(<App />);
